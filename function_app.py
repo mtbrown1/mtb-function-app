@@ -3,76 +3,134 @@ from jsonschema import validate, ValidationError, SchemaError
 import azure.functions as func
 import logging, json, os
 
-
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
-send_email_schema = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "minLength": 1
-        },
-        "company": {
-            "type": "string"
-        },
-        "email": {
-            "type": "string",
-            "pattern": "^[a-z0-9_.±]+@[a-z0-9.-]+(\.[a-z]{2,})+$",
-            "message": "Boop"
-        },
-        "message": {
-            "type": "string",
-            "minLength": 1
-        }
-    },
-    "required": ["name", "email", "message"]
-}
 
 @app.route(route="emailMe")
 def emailMe(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processing the emailMe request.')
     req_body = req.get_json()
+    
+    send_email_schema = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "minLength": 1
+            },
+            "company": {
+                "type": "string"
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-z0-9_.±]+@[a-z0-9.-]+(\.[a-z]{2,})+$",
+                "message": "Boop"
+            },
+            "message": {
+                "type": "string",
+                "minLength": 1
+            }
+        },
+        "required": ["name", "email", "message"]
+    }
 
+    is_valid, error_message = validateFormData(req_body, send_email_schema)
+    if not is_valid:
+        return func.HttpResponse(error_message, mimetype='application/json', status_code=400)
+
+    person = req_body['name']
+    if req_body['company']:
+        person += " from " + req_body['company']
+    subject = "Resume Contact Request: " + person
+    plaintext = f'{req_body}'
+    html = f"""
+        <html>
+            <body>
+                <div>{person} wants to reach out to you!</div>
+                <div>Source: Resume Contact Form</div>
+                <div>Message: </div>
+                <div>{req_body["message"]}</div>
+                <div>Reach out to {req_body['name']} at {req_body["email"]}
+            </body>
+        </html>
+    """
+    email_sent, response = sendEmail({
+        "subject": subject,
+        "plainText": plaintext,
+        "html": html
+    })
+    if not email_sent:
+        return func.HttpResponse(response, mimetype='application/json', status_code=500)
+
+    return func.HttpResponse(json.dumps({'status': 'success'}), mimetype='application/json', status_code=200)
+
+@app.route(route="businessEmailMe")
+def businessEmailMe(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processing the businessEmailMe request.')
+    req_body = req.get_json()
+    
+    send_email_schema = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "minLength": 1
+            },
+            "business": {
+                "type": "string"
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-z0-9_.±]+@[a-z0-9.-]+(\.[a-z]{2,})+$",
+            },
+            "message": {
+                "type": "string",
+                "minLength": 1
+            },
+            "phone": {
+                "type": "string"
+            },
+            "time": {
+                "type": "string"
+            }
+        },
+        "required": ["name", "email", "message"]
+    }
+    is_valid, error_message = validateFormData(req_body, send_email_schema)
+    if not is_valid:
+        return func.HttpResponse(error_message, mimetype='application/json', status_code=400)
+
+    person = req_body['name']
+    if req_body['business']:
+        person += " from " + req_body['business']
+
+    subject = f"KB Solutions Contact Request: {person}"
+    plaintext = f'{req_body}'
+
+    html = f"""
+        <html>
+            <body>
+                <div>{person} wants to reach out to you!</div>
+                <div>Source: KB Solutions Contact Form</div>
+                <div>Phone: {req_body['phone']}</div>
+                <div>Time: {req_body['time']}</div>
+                <div>Message: </div>
+                <div>{req_body["message"]}</div>
+                <div>Reach out to {req_body['name']} at {req_body["email"]}
+            </body>
+        </html>
+    """
+    email_sent, response = sendEmail({
+        "subject": subject,
+        "plainText": plaintext,
+        "html": html
+    })
+    return func.HttpResponse(response, mimetype='application/json', status_code=200 if email_sent else 500)
+
+
+def validateFormData(req_body, schema):
     try:
-        validate(req_body, send_email_schema)
-
-        connection_string = os.environ["EMAIL_SERVICE_CONNECTION_STRING"]
-        client = EmailClient.from_connection_string(connection_string)
-
-        person = req_body['name']
-        if req_body['company']:
-            person += " from " + req_body['company']
-
-        subject = "Contact Request: " + person
-        plaintext = f'{req_body}'
-
-        html = f"""
-            <html>
-                <body>
-                    <div>{person} wants to reach out to you!</div>
-                    <div>Message: </div>
-                    <div>{req_body["message"]}</div>
-                    <div>Reach out to {req_body['name']} at {req_body["email"]}
-                </body>
-            </html>
-        """
-
-        message = {
-            "senderAddress": "ContactMe@mattbrownsoftware.dev",
-            "recipients": {
-                "to": [{"address": os.environ["CONTACT_EMAIL_ADDRESS"]}]
-            },
-            "content": {
-                "subject": subject,
-                "plainText": plaintext,
-                "html": html
-            },
-        }
-        poller = client.begin_send(message)
-        result = poller.result()
-        logging.info(f"Message sent: {result}")
-
+        validate(req_body, schema)
+        return True, None
     except ValidationError as ve:
         logging.info(f"Failure due to invalid params: {ve}")
         message = ve.message
@@ -82,10 +140,26 @@ def emailMe(req: func.HttpRequest) -> func.HttpResponse:
             message = f"{ve.instance} is not a valid email address"
         elif ve.validator == "minLength":
             message = f"'{ve.json_path[2:]}' should be non-empty"
-        return func.HttpResponse(json.dumps({'status': 'failure', 'reason': f'Bad Parameters: {message}'}), mimetype='application/json', status_code=400) 
+        return False, json.dumps({'status': 'failure', 'reason': f'Bad Parameters: {message}'})
+    except SchemaError as se:
+        return False, se.message
+
+def sendEmail(message_content):
+    try:
+        connection_string = os.environ["EMAIL_SERVICE_CONNECTION_STRING"]
+        client = EmailClient.from_connection_string(connection_string)
+        message = {
+            "senderAddress": "ContactMe@mattbrownsoftware.dev",
+            "recipients": {
+                "to": [{"address": os.environ["CONTACT_EMAIL_ADDRESS"]}]
+            },
+            "content": message_content
+        }
+        poller = client.begin_send(message)
+        result = poller.result()
+        logging.info(f"Message sent: {result}")
+        return True, json.dumps({'status': 'success'})
 
     except Exception as ex:
         logging.error(f"Server error: {ex}")
-        return func.HttpResponse(json.dumps({'status': 'failure', 'reason': str(ex)}), mimetype='application/json', status_code=500)
-
-    return func.HttpResponse(json.dumps({'status': 'success'}), mimetype='application/json', status_code=200)
+        return False, json.dumps({'status': 'failure', 'reason': str(ex)})
